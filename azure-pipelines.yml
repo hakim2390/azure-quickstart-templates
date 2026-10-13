@@ -1,31 +1,120 @@
-# Starter pipeline
-# Start with a minimal pipeline that you can customize to build and deploy your code.
-# Add steps that build, run tests, deploy, and more:
-# https://aka.ms/yaml
-
 trigger:
   branches:
     include:
-    - master
     - main
   paths:
     include:
     - quickstarts/microsoft.storage/storage-account-create/*
 
-pool:
-  vmImage: 'ubuntu-latest'
+variables:
+  serviceConnection: 'Azure-ARM-Connection'
+  subscriptionId: 'e205edf9-df4c-4aad-83c0-3bc0f2d466c7'
+  location: 'South India'
+  templatePath: 'quickstarts/microsoft.storage/storage-account-create/azuredeploy.json'
+  paramsPath: 'quickstarts/microsoft.storage/storage-account-create/azuredeploy.parameters.json'
+  devResourceGroup: 'VisualStudioOnline-2E098C01EF8141729D3E858D9BD37C2F'
+  prodResourceGroup: 'VisualStudioOnline-DBEDE2304E4945868A7D98F0F6BD3E02'
 
-steps:
-- task: AzureResourceManagerTemplateDeployment@3
-  displayName: 'Deploy Storage Account ARM Template'
-  inputs:
-    deploymentScope: 'Resource Group'
-    azureResourceManagerConnection: 'Azure-ARM-Connection'
-    subscriptionId: 'e205edf9-df4c-4aad-83c0-3bc0f2d466c7'
-    action: 'Create Or Update Resource Group'
-    resourceGroupName: 'VisualStudioOnline-2E098C01EF8141729D3E858D9BD37C2F'
-    location: 'South India'
-    templateLocation: 'Linked artifact'
-    csmFile: 'quickstarts/microsoft.storage/storage-account-create/azuredeploy.json'
-    csmParametersFile: 'quickstarts/microsoft.storage/storage-account-create/azuredeploy.parameters.json'
-    overrideParameters: '-storageAccountName "storage$(Build.BuildId)lab"'
+stages:
+# ---------------------------------------------------------
+# STAGE 1: VALIDATION & WHAT-IF (DRY RUN)
+# ---------------------------------------------------------
+- stage: Validate
+  displayName: 'Validate & What-If Analysis'
+  jobs:
+  - job: ValidateARM
+    displayName: 'Validate Template & Check Drift'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - task: AzureResourceManagerTemplateDeployment@3
+      displayName: 'Run ARM Template Validation'
+      inputs:
+        deploymentScope: 'Resource Group'
+        azureResourceManagerConnection: '$(serviceConnection)'
+        subscriptionId: '$(subscriptionId)'
+        action: 'Create Or Update Resource Group'
+        resourceGroupName: '$(devResourceGroup)'
+        location: '$(location)'
+        templateLocation: 'Linked artifact'
+        csmFile: '$(templatePath)'
+        csmParametersFile: '$(paramsPath)'
+        deploymentMode: 'Validation'
+
+    - task: AzureCLI@2
+      displayName: 'Execute ARM What-If Dry Run'
+      inputs:
+        azureSubscription: '$(serviceConnection)'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          echo "Running What-If analysis against $(devResourceGroup)..."
+          az deployment group what-if \
+            --resource-group "$(devResourceGroup)" \
+            --template-file "$(templatePath)" \
+            --parameters "$(paramsPath)" \
+            --parameters storageAccountName="strgdev$(Build.BuildId)lab"
+
+# ---------------------------------------------------------
+# STAGE 2: CONTINUOUS DEPLOYMENT TO DEV
+# ---------------------------------------------------------
+- stage: Deploy_Dev
+  displayName: 'Deploy to Development'
+  dependsOn: Validate
+  jobs:
+  - deployment: DeployDevJob
+    displayName: 'Deploy Storage Account to Dev'
+    pool:
+      vmImage: 'ubuntu-latest'
+    environment: 'Development'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self
+          - task: AzureResourceManagerTemplateDeployment@3
+            displayName: 'Deploy to Dev Resource Group'
+            inputs:
+              deploymentScope: 'Resource Group'
+              azureResourceManagerConnection: '$(serviceConnection)'
+              subscriptionId: '$(subscriptionId)'
+              action: 'Create Or Update Resource Group'
+              resourceGroupName: '$(devResourceGroup)'
+              location: '$(location)'
+              templateLocation: 'Linked artifact'
+              csmFile: '$(templatePath)'
+              csmParametersFile: '$(paramsPath)'
+              deploymentMode: 'Incremental'
+              overrideParameters: '-storageAccountName "strgdev$(Build.BuildId)lab"'
+
+# ---------------------------------------------------------
+# STAGE 3: GATED DEPLOYMENT TO PRODUCTION
+# ---------------------------------------------------------
+- stage: Deploy_Prod
+  displayName: 'Deploy to Production'
+  dependsOn: Deploy_Dev
+  jobs:
+  - deployment: DeployProdJob
+    displayName: 'Deploy Storage Account to Prod'
+    pool:
+      vmImage: 'ubuntu-latest'
+    environment: 'Production'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self
+          - task: AzureResourceManagerTemplateDeployment@3
+            displayName: 'Deploy to Prod Resource Group'
+            inputs:
+              deploymentScope: 'Resource Group'
+              azureResourceManagerConnection: '$(serviceConnection)'
+              subscriptionId: '$(subscriptionId)'
+              action: 'Create Or Update Resource Group'
+              resourceGroupName: '$(prodResourceGroup)'
+              location: '$(location)'
+              templateLocation: 'Linked artifact'
+              csmFile: '$(templatePath)'
+              csmParametersFile: '$(paramsPath)'
+              deploymentMode: 'Incremental'
+              overrideParameters: '-storageAccountName "strgprod$(Build.BuildId)lab"'
